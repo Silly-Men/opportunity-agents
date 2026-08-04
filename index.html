@@ -4619,9 +4619,46 @@ async function downloadWord(id) {
   window.open(`/api/opportunities/${id}/export`, '_blank');
 }
 
+// Pipe-table blocks render as REAL html tables (cleanup batch, 3 Aug) — the
+// print/PDF view shares the docx export's structure, so a table the Word doc
+// carries as <w:tbl> is a <table> here, never flattened pipe text.
+function pipeTablesToHtml(text) {
+  const lines = text.split('\n');
+  const out = [];
+  let rows = [];
+  const isRow = (l) => {
+    const t = l.trim();
+    return t.startsWith('|') ? t.split('|').filter(c => c.trim() !== '').length >= 2
+      : (t.includes(' | ') && t.split('|').length >= 2);
+  };
+  const isSep = (l) => {
+    const t = l.trim().replace(/^\|/, '').replace(/\|$/, '');
+    return t.length > 0 && /^[\s|:\-—–]+$/.test(t);
+  };
+  const cells = (l) => l.trim().replace(/^\|/, '').replace(/\|$/, '')
+    .split('|').map(c => c.replace(/\*\*/g, '').trim());
+  const flush = () => {
+    const data = rows.filter(r => !isSep(r)).map(cells);
+    if (data.length >= 2) {
+      const head = data[0].map(c => `<th>${c}</th>`).join('');
+      const body = data.slice(1).map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('');
+      out.push(`<table class="md-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`);
+    } else {
+      data.forEach(r => out.push(r.join(' | ')));
+    }
+    rows = [];
+  };
+  for (const line of lines) {
+    if (isRow(line) || (rows.length && isSep(line))) rows.push(line);
+    else { if (rows.length) flush(); out.push(line); }
+  }
+  if (rows.length) flush();
+  return out.join('\n');
+}
+
 function markdownToHtml(text) {
   if (!text) return '';
-  return text
+  return pipeTablesToHtml(text)
     .replace(/^### (.+)$/gm, '<h3>$1</h3>')
     .replace(/^## (.+)$/gm, '<h2>$1</h2>')
     .replace(/^# (.+)$/gm, '<h1>$1</h1>')
@@ -4629,8 +4666,9 @@ function markdownToHtml(text) {
     .replace(/\*(.+?)\*/g, '<em>$1</em>')
     .replace(/^- (.+)$/gm, '<li>$1</li>')
     .replace(/(<li>.*<\/li>)/gs, '<ul>$1</ul>')
-    .replace(/\n\n/g, '</p><p>')
-    .replace(/\n/g, '<br>');
+    .replace(/(<table[\s\S]*?<\/table>)|\n\n/g, (m, table) => table || '</p><p>')
+    .replace(/(<table[\s\S]*?<\/table>)|\n/g, (m, table) => table || '<br>')
+    + '<style>.md-table{border-collapse:collapse;margin:10px 0;width:100%}.md-table th,.md-table td{border:1px solid #ddd;padding:6px 10px;text-align:left;font-size:13px}.md-table th{background:#F2F4F7;font-weight:700}</style>';
 }
 
 async function printBlueprint(id) {

@@ -1,7 +1,119 @@
 const express = require('express');
 const Airtable = require('airtable');
 const path = require('path');
-const { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, BorderStyle, PageBreak } = require('docx');
+const { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, BorderStyle, PageBreak, Table, TableRow, TableCell, WidthType } = require('docx');
+
+// ---------------------------------------------------------------------------
+// Real Word tables (cleanup batch, 3 Aug). Authored pipe tables used to emit
+// as plain text lines — a flattened-table blueprint downstream systems then
+// had to parse back apart. Every export now builds them as real docx Table
+// objects, and the build GUARD below refuses to ship a document whose
+// <w:tbl> count disagrees with the number of tables authored.
+// ---------------------------------------------------------------------------
+
+function isTableRowLine(line) {
+  const t = line.trim();
+  return t.startsWith('|') ? t.split('|').filter(c => c.trim() !== '').length >= 2
+    : (t.includes(' | ') && t.split('|').length >= 2);
+}
+
+function isSeparatorLine(line) {
+  const t = line.trim().replace(/^\|/, '').replace(/\|$/, '');
+  return t.length > 0 && /^[\s|:\-—–]+$/.test(t);
+}
+
+function splitCells(line) {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '')
+    .split('|').map(c => c.replace(/\*\*/g, '').trim());
+}
+
+// Split section text into blocks: runs of 2+ consecutive pipe-table lines
+// become {type:'table', rows}, everything else {type:'lines', lines}.
+function parseBlocks(text) {
+  const lines = text.split('\n');
+  const blocks = [];
+  let buffer = [];
+  let tableRows = [];
+  const flushLines = () => { if (buffer.length) { blocks.push({ type: 'lines', lines: buffer }); buffer = []; } };
+  const flushTable = () => {
+    const rows = tableRows.filter(r => !isSeparatorLine(r)).map(splitCells);
+    if (rows.length >= 2) blocks.push({ type: 'table', rows });
+    else rows.forEach(r => buffer.push(r.join(' | ')));  // a lone pipe line is prose
+    tableRows = [];
+  };
+  for (const line of lines) {
+    if (isTableRowLine(line) || (tableRows.length && isSeparatorLine(line))) {
+      if (!tableRows.length) flushLines();
+      tableRows.push(line);
+    } else {
+      if (tableRows.length) flushTable();
+      if (line.trim()) buffer.push(line);
+    }
+  }
+  if (tableRows.length) flushTable();
+  flushLines();
+  return blocks;
+}
+
+function buildDocxTable(rows) {
+  const width = Math.max(...rows.map(r => r.length));
+  return new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows: rows.map((cells, rowIndex) => new TableRow({
+      children: Array.from({ length: width }, (_, i) => new TableCell({
+        shading: rowIndex === 0 ? { fill: 'F2F4F7' } : undefined,
+        margins: { top: 60, bottom: 60, left: 100, right: 100 },
+        children: [new Paragraph({
+          children: [new TextRun({
+            text: cells[i] || '', size: 20, font: 'Arial',
+            bold: rowIndex === 0, color: '1D1D1F'
+          })]
+        })]
+      }))
+    }))
+  });
+}
+
+// text → docx children with REAL tables; counter.tables tracks authored count.
+function bodyWithTables(text, counter) {
+  if (!text) return [];
+  const children = [];
+  for (const block of parseBlocks(text)) {
+    if (block.type === 'table') {
+      counter.tables += 1;
+      children.push(buildDocxTable(block.rows));
+      children.push(new Paragraph({ children: [], spacing: { after: 120 } }));
+    } else {
+      for (const line of block.lines) {
+        const isBold = line.startsWith('**') || line.startsWith('#');
+        const clean = line.replace(/^#+\s*/, '').replace(/\*\*/g, '').trim();
+        if (!clean) continue;
+        children.push(new Paragraph({
+          children: [new TextRun({ text: clean, size: 22, font: 'Arial', bold: isBold, color: '1D1D1F' })],
+          spacing: { after: 120 }
+        }));
+      }
+    }
+  }
+  return children;
+}
+
+// THE GUARD: unzip the packed docx and count <w:tbl> in document.xml; a
+// mismatch with the authored count fails the export loudly, naming both
+// numbers — a flattened table can no longer ship silently.
+async function assertTableIntegrity(buffer, authoredTables, label) {
+  const JSZip = require('jszip');
+  const zip = await JSZip.loadAsync(buffer);
+  const xml = await zip.file('word/document.xml').async('string');
+  const emitted = (xml.match(/<w:tbl(?:\s|>)/g) || []).length;
+  if (emitted !== authoredTables) {
+    throw new Error(
+      `table integrity check failed for ${label}: ${authoredTables} table(s) ` +
+      `authored but ${emitted} <w:tbl> element(s) in the output — refusing to ` +
+      `ship a flattened-table document`);
+  }
+  return emitted;
+}
 
 // Loaded defensively - a broken optional dependency here must never crash the
 // whole server (it did once, taking down every API route, not just document
@@ -152,24 +264,10 @@ app.get('/api/opportunities/:id/export', async (req, res) => {
       });
     }
 
+    const authored = { tables: 0 };
     function body(text) {
-      if (!text) return [];
-      // Convert markdown to paragraphs
-      return text.split('\n').filter(line => line.trim()).map(line => {
-        const isBold = line.startsWith('**') || line.startsWith('###') || line.startsWith('##') || line.startsWith('#');
-        const clean = line.replace(/^#+\s*/, '').replace(/\*\*/g, '').trim();
-        if (!clean) return null;
-        return new Paragraph({
-          children: [new TextRun({
-            text: clean,
-            size: 22,
-            font: 'Arial',
-            bold: isBold,
-            color: '1D1D1F'
-          })],
-          spacing: { after: 120 }
-        });
-      }).filter(Boolean);
+      // Real Word tables + prose, via the shared block parser (3 Aug).
+      return bodyWithTables(text, authored);
     }
 
     const SECTIONS = [
@@ -267,6 +365,7 @@ app.get('/api/opportunities/:id/export', async (req, res) => {
     });
 
     const buffer = await Packer.toBuffer(doc);
+    await assertTableIntegrity(buffer, authored.tables, req.path);
     const filename = name.replace(/[^a-z0-9]/gi, '_').substring(0, 50);
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
@@ -358,14 +457,10 @@ app.get('/api/acquisitions/:id/export', async (req, res) => {
       });
     }
 
+    const authored = { tables: 0 };
     function body(text) {
-      if (!text) return [];
-      return text.split('\n').filter(l => l.trim()).map(line => {
-        const isBold = line.startsWith('**') || line.startsWith('#');
-        const clean = line.replace(/^#+\s*/, '').replace(/\*\*/g, '').trim();
-        if (!clean) return null;
-        return new Paragraph({ children: [new TextRun({ text: clean, size: 22, font: 'Arial', bold: isBold, color: '1D1D1F' })], spacing: { after: 120 } });
-      }).filter(Boolean);
+      // Real Word tables + prose, via the shared block parser (3 Aug).
+      return bodyWithTables(text, authored);
     }
 
     const SECTIONS = [
@@ -405,6 +500,7 @@ app.get('/api/acquisitions/:id/export', async (req, res) => {
     });
 
     const buffer = await Packer.toBuffer(doc);
+    await assertTableIntegrity(buffer, authored.tables, req.path);
     const filename = name.replace(/[^a-z0-9]/gi, '_').substring(0, 50);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}_Acquisition_Blueprint.docx"`);
@@ -810,4 +906,10 @@ app.delete('/api/queue/:id', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`OpportunityAI running on port ${PORT}`));
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`OpportunityAI running on port ${PORT}`));
+}
+
+// Exported for the table-integrity smoke test (3 Aug) — requiring this module
+// no longer binds the port, so the real export helpers are testable.
+module.exports = { app, parseBlocks, bodyWithTables, buildDocxTable, assertTableIntegrity };
