@@ -1159,7 +1159,11 @@ function toggleDictation(targetId, btnEl) {
 
 async function createOpp(name, signal, sourceTrend = '', sourceLibraries = '', differentiatesFrom = '', sourceMode = '', runType = '') {
   const res = await fetch('/api/opportunities', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, signal, sourceTrend, sourceLibraries, differentiatesFrom, sourceMode, runType }) });
-  return await res.json();
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || !body.id) {
+    throw new Error(`Failed to create opportunity "${name}": ${body.error || res.status}`);
+  }
+  return body;
 }
 
 async function saveTrend(fields) {
@@ -4586,6 +4590,10 @@ function guerrillaIntegrationBtnHtml(id, hasGuerrilla) {
   return `<button class="btn-revise" onclick="runGuerrillaIntegration('${id}')" style="background:#7C3AED;color:white;border:none;" title="Run Guerrilla Marketer, update GTM and Market Analysis, recompile Blueprint">⚡ Run Guerrilla Integration</button>`;
 }
 
+function upgradeToDeepModeBtnHtml(id) {
+  return `<button class="btn-revise" onclick="upgradeToFullBlueprint('${id}')" style="background:#0F1117;color:#00C896;border:1px solid #00C896;" title="Run Brand Developer, GTM Strategist, Guerrilla Marketer, and AI Execution Designer, then recompile the full Blueprint">🔬 Upgrade to Deep Mode</button>`;
+}
+
 function buildCardActions(item) {
   const id = item.id;
   const status = item.Status || '';
@@ -4604,11 +4612,11 @@ function buildCardActions(item) {
     <button class="btn-revise" onclick="downloadWord('${id}')" title="Download Word document">📄 Word Doc</button>
   `;
   const showGuerrilla = ['Review', 'Approved', 'On Hold'].includes(status);
-  const utilRow2 = `<div class="card-actions-row">${elevateBtn}${favBtn}${maybeBtn}${dislikeBtn}${showGuerrilla ? guerrillaIntegrationBtnHtml(id, !!item['Guerrilla Marketing Plan']) : ''}<button type="button" class="expand-btn" onclick="toggleCard('${id}')">▲</button>${del}</div>`;
-  const canUpgrade = (item['Source Mode'] === 'Fast Mode' || item['Source Mode'] === 'Wild Mode') && !item['Brand Name & Positioning'];
-  const upgradeBtn = canUpgrade ? `<button class="btn-revise" onclick="upgradeToFullBlueprint('${id}')" title="Run the remaining Deep Mode stages (Brand, GTM, AI Execution Design) on top of this result">🔬 Upgrade to Full Blueprint</button>` : '';
-  if (status === 'Review') return `${note}<button class="btn-approve" onclick="updateItem('${id}','Approved')">✓ Approve</button><button class="btn-revise" id="revise-${id}" onclick="reviseOpportunity('${id}')" title="Re-run the Orchestrator's blueprint compile using your notes as revision guidance">↩ Revise</button><button class="btn-revise" id="revise-biz-${id}" onclick="reviseBusinessModel('${id}')" title="Re-run Business Architecture, Brand, GTM, and AI Execution Design using your notes to actually change the business model, not just the summary">🔧 Revise Business Model</button>${upgradeBtn}${likesBox}${dislikesBox}<div class="card-actions-row">${holdBtn}${exportBtns}${copyId}</div>${utilRow2}`;
-  if (status === 'Approved') return `<span style="font-size:12px;color:#00C896;font-weight:700">✅ Approved</span>${upgradeBtn}<div class="card-actions-row">${exportBtns}${copyId}</div>${utilRow2}`;
+  const canUpgrade = ['Review', 'Approved', 'On Hold'].includes(status) &&
+    (!item['Brand Name & Positioning'] || item['Brand Name & Positioning'].trim() === '');
+  const utilRow2 = `<div class="card-actions-row">${elevateBtn}${favBtn}${maybeBtn}${dislikeBtn}${canUpgrade ? upgradeToDeepModeBtnHtml(id) : ''}${showGuerrilla ? guerrillaIntegrationBtnHtml(id, !!item['Guerrilla Marketing Plan']) : ''}<button type="button" class="expand-btn" onclick="toggleCard('${id}')">▲</button>${del}</div>`;
+  if (status === 'Review') return `${note}<button class="btn-approve" onclick="updateItem('${id}','Approved')">✓ Approve</button><button class="btn-revise" id="revise-${id}" onclick="reviseOpportunity('${id}')" title="Re-run the Orchestrator's blueprint compile using your notes as revision guidance">↩ Revise</button><button class="btn-revise" id="revise-biz-${id}" onclick="reviseBusinessModel('${id}')" title="Re-run Business Architecture, Brand, GTM, and AI Execution Design using your notes to actually change the business model, not just the summary">🔧 Revise Business Model</button>${likesBox}${dislikesBox}<div class="card-actions-row">${holdBtn}${exportBtns}${copyId}</div>${utilRow2}`;
+  if (status === 'Approved') return `<span style="font-size:12px;color:#00C896;font-weight:700">✅ Approved</span><div class="card-actions-row">${exportBtns}${copyId}</div>${utilRow2}`;
   if (status === 'On Hold') return `<button class="btn-approve" onclick="updateItem('${id}','Review')">↑ Back to Review</button><div class="card-actions-row">${exportBtns}${copyId}</div>${utilRow2}`;
   if (status === 'Dropped') return `<button class="btn-revise" onclick="updateItem('${id}','Signal Captured')">↺ Reopen</button><div class="card-actions-row">${copyId}</div>${utilRow2}`;
   return `<span style="font-size:12px;color:#AAA">Pipeline running…</span><button class="btn-drop" onclick="updateItem('${id}','Dropped')">🚫 Drop</button><div class="card-actions-row">${holdBtn}${copyId}</div>${utilRow2}`;
@@ -4819,6 +4827,8 @@ function buildCard(item) {
   const isMaybe = !!item['Maybe'];
   const isElevated = !!item['Elevated'];
   const isFastMode = item['Source Mode'] === 'Fast Mode';
+  const canUpgradeToDeep = ['Review', 'Approved', 'On Hold'].includes(status) &&
+    (!item['Brand Name & Positioning'] || item['Brand Name & Positioning'].trim() === '');
   const date = item.Created ? new Date(item.Created).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '';
   const isActive = !['Review','Approved','On Hold','Dropped'].includes(status);
   const isComplete = status === 'Approved';
@@ -4845,9 +4855,10 @@ function buildCard(item) {
         ${item['Influencer Affiliate Fit'] ? `<span style="font-size:10px;font-weight:700;padding:3px 10px;border-radius:20px;background:${item['Influencer Affiliate Fit']==='High'?'#FEF3C7':'#F3F4F6'};color:${item['Influencer Affiliate Fit']==='High'?'#92400E':'#6B7280'}">📣 Influencer Fit: ${item['Influencer Affiliate Fit']}</span>` : ''}
         ${item['Preorder Candidate'] === 'Yes' ? `<span style="font-size:10px;font-weight:700;padding:3px 10px;border-radius:20px;background:#CCFBF1;color:#0F766E">🚀 Preorder Ready</span>` : ''}
         ${isFastMode ? `<span class="fast-badge" title="Generated via Fast Mode">⚡ FAST</span>` : ''}
+        ${canUpgradeToDeep ? `<span style="font-size:10px;font-weight:700;padding:3px 10px;border-radius:20px;background:#FEF3C7;color:#92400E" title="Missing Brand, GTM, Guerrilla Marketing, and AI Execution Design — click Upgrade to Deep Mode to fill them in">🔬 Upgradeable</span>` : ''}
       </div>
     </div>
-    <div class="opp-card-quickactions">${(() => { const q = buildQuickActionButtons(item); const showGuerrilla = ['Review','Approved','On Hold'].includes(status); return `${q.elevateBtn}${q.favBtn}${q.maybeBtn}${q.dislikeBtn}${showGuerrilla ? guerrillaIntegrationBtnHtml(item.id, !!item['Guerrilla Marketing Plan']) : ''}<button type="button" class="expand-btn" onclick="toggleCard('${item.id}')">▼</button>${q.del}`; })()}</div>
+    <div class="opp-card-quickactions">${(() => { const q = buildQuickActionButtons(item); const showGuerrilla = ['Review','Approved','On Hold'].includes(status); return `${q.elevateBtn}${q.favBtn}${q.maybeBtn}${q.dislikeBtn}${canUpgradeToDeep ? upgradeToDeepModeBtnHtml(item.id) : ''}${showGuerrilla ? guerrillaIntegrationBtnHtml(item.id, !!item['Guerrilla Marketing Plan']) : ''}<button type="button" class="expand-btn" onclick="toggleCard('${item.id}')">▼</button>${q.del}`; })()}</div>
     <div class="card-expanded" id="expanded-${item.id}">
       ${signal ? `<div class="opp-description-box">
         <div class="opp-description-label">📄 Description</div>

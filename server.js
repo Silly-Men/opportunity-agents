@@ -910,6 +910,11 @@ if (require.main === module) {
   app.listen(PORT, () => console.log(`OpportunityAI running on port ${PORT}`));
 }
 
-// Exported for the table-integrity smoke test (3 Aug) — requiring this module
-// no longer binds the port, so the real export helpers are testable.
-module.exports = { app, parseBlocks, bodyWithTables, buildDocxTable, assertTableIntegrity };
+// Vercel's builder requires the module's default export to be the server/
+// handler function itself, so `app` (an Express app, which is a function) is
+// the module.exports value. The table-integrity smoke test (3 Aug) needs the
+// export helpers too, so they're attached as named properties on `app` -
+// requiring this module no longer binds the port, so they stay testable via
+// `const { parseBlocks, bodyWithTables, assertTableIntegrity } = require('./server.js')`.
+Object.assign(app, { app, parseBlocks, bodyWithTables, buildDocxTable, assertTableIntegrity });
+module.exports = app;
