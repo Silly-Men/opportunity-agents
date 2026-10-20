@@ -129,9 +129,10 @@ app.use(express.static(path.join(__dirname)));
 
 const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(process.env.AIRTABLE_BASE_ID);
 
-// Expose API key to frontend
+// The key is no longer sent to the browser (20 Oct 2026): this route handed the Anthropic API key to anyone who asked.
+// The browser-run agents stop working until the rebuild moves the Claude calls onto the server.
 app.get('/api/config', (req, res) => {
-  res.json({ apiKey: process.env.ANTHROPIC_API_KEY });
+  res.status(410).json({ error: 'The key is no longer sent to the browser. The agents are paused until the rebuild.' });
 });
 
 // ─── DOCUMENT PARSING (Personalized Deep Mode attachment) ─────────────────────
